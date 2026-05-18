@@ -1,0 +1,151 @@
+* maiproxy Installation and Configuration Guide
+
+** Overview
+maiproxy is a lightweight authentication proxy built on PostgreSQL, PostgREST, and nginx.
+It receives external IAM JWTs, validates them, and issues internally signed EdDSA JWTs
+usable by grid or batch jobs.
+
+This document guides you through installation, configuration, JWKS creation, nginx/PostgREST setup,
+and testing examples.
+
+** Requirements
+- PostgreSQL 18+
+- PostgREST 14+
+- nginx with TLS certificate
+- pgsodium extension
+- A valid IAM issuer (e.g. https://iam-virgo.cloud.cnaf.infn.it)
+- A host certificate trusted by clients
+
+** Database Setup
+Load SQL files in this order:
+1. 01_roles.sql
+2. 02_extensions.sql
+3. 03_core.sql
+4. (Optional) 90_optional_hs256.sql
+
+Initialize the database:
+#+BEGIN_SRC sh
+psql -U postgres -d maiproxy -f 01_roles.sql
+psql -U postgres -d maiproxy -f 02_extensions.sql
+psql -U postgres -d maiproxy -f 03_core.sql
+#+END_SRC
+
+** Export Internal EdDSA Public Key for JWKS
+Run inside PostgreSQL:
+#+BEGIN_SRC sql
+SELECT sec.export_eddsa_jwk(2) AS jwk;
+#+END_SRC
+Copy the resulting JSON object.
+
+** Create JWKS.json
+Example structure combining external IAM JWKS and internal maiproxy JWK:
+#+BEGIN_SRC json
+{
+  "keys": [
+    { "kty": "OKP", "crv": "Ed25519", "x": "...", "kid": "ed25519-2", "use": "sig", "alg": "EdDSA" },
+    { "kty": "RSA", "e": "AQAB", "n": "...", "kid": "iam-virgo-key", "alg": "RS256", "use": "sig" }
+  ]
+}
+#+END_SRC
+Save as:
+#+BEGIN_SRC sh
+/etc/postgrest/JWKS.json
+#+END_SRC
+Permissions:
+#+BEGIN_SRC sh
+chmod 600 /etc/postgrest/JWKS.json
+chown postgrest /etc/postgrest/JWKS.json
+#+END_SRC
+
+** PostgREST Configuration
+Example configuration file **prest_igwn.conf**:
+#+BEGIN_SRC conf
+db-uri = "postgres://authenticator:<db_secure_password>@<database_host>:5432/maiproxy"
+db-anon-role = "anon"
+db-schemas = "api"
+server-host = "127.0.0.1"
+server-port = "3000"
+jwt-secret = "@/etc/postgrest/JWKS.json"
+log-level = "debug"
+#+END_SRC
+
+** nginx Configuration
+#+BEGIN_SRC nginx
+# RPC endpoints: register_my_jwt, get_iam_jwt
+location /rpc/ {
+    default_type application/json;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Authorization $http_authorization;
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    proxy_pass http://postgrest;
+
+    proxy_connect_timeout 5s;
+    proxy_read_timeout    60s;
+    proxy_send_timeout    60s;
+    client_max_body_size  10m;
+
+    add_header X-Upstream-Addr   $upstream_addr   always;
+    add_header X-Upstream-Status $upstream_status always;
+}
+
+# For read-only views/tables under /api/
+location /api/ {
+    default_type application/json;
+    proxy_hide_header Content-Location;
+    add_header Content-Location /api/$upstream_http_content_location;
+    proxy_set_header Connection "";
+    proxy_http_version 1.1;
+    proxy_pass http://postgrest/;
+}
+#+END_SRC
+
+** How maiproxy Works
+1. A client obtains a fresh IAM JWT.
+2. It calls /rpc/register_my_jwt with that token.
+3. maiproxy validates it and produces an internally signed EdDSA JWT (valid 4–7 days).
+4. Batch jobs use this internal JWT to request short-lived IAM JWTs via /rpc/get_iam_jwt.
+
+** Usage Example: Obtaining a maiproxy JWT
+#+BEGIN_SRC sh
+# 1. Fetch fresh IAM token
+BEARER_TOKEN=`oidc-token -f myclient`
+MAIPROXY_EP="https://<webservice_host>:8443"
+touch maiproxy.jwt ; chmod 600 maiproxy.jwt
+
+# 2. Register the IAM token to maiproxy
+curl --capath /etc/grid-security/certificates -fsS -X POST \
+  -H "Authorization: Bearer $BEARER_TOKEN" \
+  -H "Content-Type: application/json" \
+  ${MAIPROXY_EP}/rpc/register_my_jwt > maiproxy.jwt
+#+END_SRC
+
+** Using maiproxy JWT to Obtain an IAM JWT
+#+BEGIN_SRC sh
+MAIPROXY_EP="https://<webservice_host>:8443"
+IGWN_JWT=$(cat maiproxy.jwt)
+MSG='{"message":{"jobid":"123.4","runtime":321,"reason":"Hi there!"}}'
+touch iam.jwt ; chmod 600 iam.jwt
+
+curl --capath /etc/grid-security/certificates -sS -X POST \
+  -H "Authorization: Bearer ${IGWN_JWT}" \
+  -H "Content-Type: application/json" \
+  --data "${MSG}" \
+  ${MAIPROXY_EP}/rpc/get_iam_jwt > iam.jwt
+#+END_SRC
+
+** Validation Tests
+1. Use expired IAM token → register_my_jwt should return an error.
+2. Use maiproxy JWT older than 7 days → get_iam_jwt should fail.
+3. Modify JWKS.json incorrectly → PostgREST should reject JWTs.
+4. Try calling get_iam_jwt with anon → should be forbidden.
+
+** Notes
+- register_my_jwt must run as anon.
+- get_iam_jwt is executed by roles mapped from JWT claim "role": virgo or igwn.
+
+** End

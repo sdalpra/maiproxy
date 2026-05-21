@@ -460,7 +460,7 @@ WITH a AS (
            FROM a
           WHERE ((a.jbt ->> 'exp'::text)::integer) > (a.now_epoch + 600)
             AND jsonb_pick(a.jbt, '{aud,sub,iss,scope,wlcg.groups}') = jsonb_pick(a.claims, '{aud,sub,iss,scope,wlcg.groups}')
-            AND (a.jcs ->> 'sub'::text) = (a.claims ->> 'sub'::text)
+            AND jsonb_pick(a.jcs, '{scope,wlcg.groups}') = jsonb_pick(a.claims, '{scope,wlcg.groups}')
           ORDER BY a.id DESC
          LIMIT 1
         )

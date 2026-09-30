@@ -61,7 +61,6 @@ CREATE INDEX mbox_claims_iss_sub_idx
 -- api.register_my_jwt()     (SECURITY DEFINER; OWNER api_owner)
 -- api.get_iam_jwt(jsonb)    (SECURITY DEFINER; OWNER api_owner)
 -- api.mbox_eddsa_insert()   (SECURITY DEFINER; OWNER api_owner)
--- >>> INCOLLA i corpi dal dump; cambia OWNER da sdp → api_owner dove serve. [1](https://istnazfisnucl-my.sharepoint.com/personal/dalpra_infn_it/Documents/Microsoft%20Copilot%20Chat%20Files/prest_schemaonly.sql)
 
 -- Trigger (EdDSA)
 CREATE TRIGGER mbox_eddsa_bi
